@@ -11,7 +11,15 @@ homepage = "https://github.com/mannlabs/timsrust"
 categories = ["accessibility", "data-structures", "parsing", "science"]
 keywords = ["MS", "LC-TIMS-TOF", "PASEF"]
 
-# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+[lib]
+crate-type = ["cdylib"]
+name = "timsrust"
+
+[profile.dev]
+debug = true
+   
+[profile.release]
+debug = true 
 
 [dependencies]
 zstd = "0.13.2"
@@ -25,6 +33,7 @@ parquet = { version = "53.0.0", optional = true }
 serde = { version = "1.0.210", features = ["derive"], optional = true }
 serde_json = { version = "1.0.128", optional = true }
 timscompress = {version = "0.1.0", optional=true}
+chrono = "0.4"
 
 [features]
 tdf = ["rusqlite"]

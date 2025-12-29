@@ -29,7 +29,6 @@ impl SpectrumReader {
     pub fn build() -> SpectrumReaderBuilder {
         SpectrumReaderBuilder::default()
     }
-
     pub fn get(&self, index: usize) -> Result<Spectrum, SpectrumReaderError> {
         self.spectrum_reader.get(index)
     }

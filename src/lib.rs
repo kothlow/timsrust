@@ -26,6 +26,7 @@ pub(crate) mod errors;
 pub(crate) mod io;
 pub(crate) mod ms_data;
 pub(crate) mod utils;
+pub(crate) mod ffi;
 
 pub mod converters {
     //! Allows conversions between domains (e.g. Time of Flight and m/z)
@@ -41,3 +42,4 @@ pub mod writers {
 }
 pub use crate::errors::*;
 pub use crate::ms_data::*;
+pub use ffi::*;
