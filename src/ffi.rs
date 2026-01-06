@@ -3,6 +3,8 @@ use std::os::raw::{c_char};
 use std::{ptr};
 use std::fs::OpenOptions;
 use std::io::Write;
+use std::sync::Mutex;
+use std::collections::HashMap;
 
 use serde::Serialize;
 
@@ -19,6 +21,12 @@ fn log_error(msg: &str) {
     {
         let _ = writeln!(file, "[{}] {}", chrono::Local::now().format("%Y-%m-%d %H:%M:%S"), msg);
     }
+}
+
+// Global storage for readers - use handle-based access
+lazy_static::lazy_static! {
+    static ref READERS: Mutex<HashMap<usize, readers::SpectrumReader>> = Mutex::new(HashMap::new());
+    static ref NEXT_HANDLE: Mutex<usize> = Mutex::new(1);
 }
 
 #[derive(Serialize)]
@@ -54,184 +62,137 @@ fn parse_precursor(dda_precursor: ms_data::Precursor, isolation_width: Option<f3
     }
 }
 
-// Read MS/MS spectra (DDA - no config needed)
+// Open a reader and return a handle
 #[no_mangle]
-pub extern "C" fn read_msn_spectra(path: *const c_char) -> *mut c_char {
-    log_error("=== read_msn_spectra called (DDA) ===");
-    
+pub extern "C" fn open_reader(path: *const c_char) -> usize {
     let result = std::panic::catch_unwind(|| {
         if path.is_null() {
             log_error("ERROR: path is null");
-            return ptr::null_mut();
+            return 0;
         }
         let path_str = match unsafe { CStr::from_ptr(path) }.to_str() {
             Ok(s) => {
-                log_error(&format!("Path: {}", s));
+                log_error(&format!("Opening reader for: {}", s));
                 s
             },
             Err(e) => {
                 log_error(&format!("ERROR: Invalid UTF-8 in path: {:?}", e));
-                return ptr::null_mut();
+                return 0;
             }
         };
 
-        log_error("Building DDA reader...");
         let reader = match readers::SpectrumReader::build()
             .with_path(path_str)
             .finalize()
         {
             Ok(r) => {
-                log_error(&format!("Reader built successfully, {} spectra", r.len()));
+                log_error(&format!("Reader opened successfully, {} spectra", r.len()));
                 r
             },
             Err(e) => {
                 log_error(&format!("ERROR: Failed to build reader: {:?}", e));
+                return 0;
+            }
+        };
+
+        // Store reader and return handle
+        let mut next_handle = NEXT_HANDLE.lock().unwrap();
+        let handle = *next_handle;
+        *next_handle += 1;
+        
+        READERS.lock().unwrap().insert(handle, reader);
+        log_error(&format!("Assigned handle: {}", handle));
+        handle
+    });
+
+    result.unwrap_or(0)
+}
+
+// Get the number of spectra in a reader
+#[no_mangle]
+pub extern "C" fn get_spectrum_count(handle: usize) -> usize {
+    let readers = READERS.lock().unwrap();
+    match readers.get(&handle) {
+        Some(reader) => reader.len(),
+        None => {
+            log_error(&format!("ERROR: Invalid handle: {}", handle));
+            0
+        }
+    }
+}
+
+// Get a single spectrum by index as JSON
+#[no_mangle]
+pub extern "C" fn get_spectrum(handle: usize, index: usize) -> *mut c_char {
+    let result = std::panic::catch_unwind(|| {
+        let readers = READERS.lock().unwrap();
+        let reader = match readers.get(&handle) {
+            Some(r) => r,
+            None => {
+                log_error(&format!("ERROR: Invalid handle: {}", handle));
                 return ptr::null_mut();
             }
         };
 
-        process_spectra(&reader)
-    });
-
-    result.unwrap_or_else(|e| {
-        log_error(&format!("PANIC caught: {:?}", e));
-        ptr::null_mut()
-    })
-}
-
-// Read MS/MS with DIA config (requires frame splitting strategy)
-#[no_mangle]
-pub extern "C" fn read_msn_spectra_with_config(path: *const c_char, config_json: *const c_char) -> *mut c_char {
-    log_error("=== read_msn_spectra_with_config called (DIA) ===");
-    
-    let result = std::panic::catch_unwind(|| {
-        if path.is_null() {
-            log_error("ERROR: path is null");
+        if index >= reader.len() {
+            log_error(&format!("ERROR: Index {} out of bounds (max: {})", index, reader.len()));
             return ptr::null_mut();
         }
-        let path_str = match unsafe { CStr::from_ptr(path) }.to_str() {
-            Ok(s) => {
-                log_error(&format!("Path: {}", s));
-                s
-            },
-            Err(e) => {
-                log_error(&format!("ERROR: Invalid UTF-8 in path: {:?}", e));
-                return ptr::null_mut();
-            }
-        };
 
-        // Parse the config from JSON
-        let config = if !config_json.is_null() {
-            match unsafe { CStr::from_ptr(config_json) }.to_str() {
-                Ok(s) if !s.trim().is_empty() => {
-                    log_error(&format!("Config JSON: {}", s));
-                    match serde_json::from_str::<SpectrumReaderConfig>(s) {
-                        Ok(cfg) => {
-                            log_error("Config parsed successfully");
-                            cfg
-                        },
-                        Err(e) => {
-                            log_error(&format!("ERROR: Failed to parse config JSON: {:?}", e));
-                            return ptr::null_mut();
-                        },
-                    }
-                },
-                _ => {
-                    log_error("No config provided, using default");
-                    SpectrumReaderConfig::default()
-                }
-            }
-        } else {
-            log_error("config_json is null, using default");
-            SpectrumReaderConfig::default()
-        };
-
-        log_error(&format!("Building DIA reader with config: {:?}", config));
-        let reader = match readers::SpectrumReader::build()
-            .with_path(path_str)
-            .with_config(config)
-            .finalize()
-        {
-            Ok(r) => {
-                log_error(&format!("Reader built successfully, {} spectra", r.len()));
-                r
-            },
-            Err(e) => {
-                log_error(&format!("ERROR: Failed to build reader: {:?}", e));
-                return ptr::null_mut();
-            }
-        };
-
-        process_spectra(&reader)
-    });
-
-    result.unwrap_or_else(|e| {
-        log_error(&format!("PANIC caught: {:?}", e));
-        ptr::null_mut()
-    })
-}
-
-// Shared processing logic
-fn process_spectra(reader: &readers::SpectrumReader) -> *mut c_char {
-    let mut out: Vec<RawSpectrumOut> = Vec::new();
-
-    log_error("Reading spectra...");
-    let limit = reader.len().min(10);
-    for index in 0..limit {
-        log_error(&format!("Reading spectrum {}/{}", index + 1, limit));
         match reader.get(index) {
-            Ok(dda_spectrum) => {
-                log_error(&format!("Got spectrum {}, has precursor: {}", index, dda_spectrum.precursor.is_some()));
-                if let Some(dda_precursor) = dda_spectrum.precursor {
-                    let isolation_width = Some(dda_spectrum.isolation_width as f32);
+            Ok(spectrum) => {
+                if let Some(dda_precursor) = spectrum.precursor {
+                    let isolation_width = Some(spectrum.isolation_width as f32);
                     let scan_start_time = Some(dda_precursor.rt as f32 / 60.0);
-
                     let precursor = parse_precursor(dda_precursor, isolation_width);
 
-                    let spectrum = RawSpectrumOut {
+                    let raw_spectrum = RawSpectrumOut {
                         precursors: vec![precursor],
                         scan_start_time,
                         ion_injection_time: None,
                         total_ion_current: 0.0,
-                        mz: dda_spectrum.mz_values.iter().map(|&x| x as f32).collect(),
+                        mz: spectrum.mz_values.iter().map(|&x| x as f32).collect(),
                         ms_level: 2,
-                        id: dda_spectrum.index.to_string(),
-                        intensity: dda_spectrum.intensities.iter().map(|&x| x as f32).collect(),
+                        id: spectrum.index.to_string(),
+                        intensity: spectrum.intensities.iter().map(|&x| x as f32).collect(),
                     };
-                    out.push(spectrum);
-                    log_error(&format!("Added spectrum {} with {} peaks", index, dda_spectrum.mz_values.len()));
-                }
-            }
-            Err(e) => {
-                log_error(&format!("ERROR: reading spectrum {}: {:?}", index, e));
-            }
-        }
-    }
 
-    log_error(&format!("Read {} spectra total, serializing...", out.len()));
-    
-    if out.is_empty() {
-        log_error("WARNING: No spectra with precursors found");
-    }
-    
-    match serde_json::to_string(&out) {
-        Ok(s) => {
-            log_error(&format!("Serialized {} bytes", s.len()));
-            match CString::new(s) {
-                Ok(cs) => {
-                    log_error("Returning CString");
-                    cs.into_raw()
-                },
-                Err(e) => {
-                    log_error(&format!("ERROR: Failed to create CString: {:?}", e));
+                    match serde_json::to_string(&raw_spectrum) {
+                        Ok(s) => match CString::new(s) {
+                            Ok(cs) => cs.into_raw(),
+                            Err(e) => {
+                                log_error(&format!("ERROR: Failed to create CString: {:?}", e));
+                                ptr::null_mut()
+                            }
+                        },
+                        Err(e) => {
+                            log_error(&format!("ERROR: Failed to serialize spectrum: {:?}", e));
+                            ptr::null_mut()
+                        }
+                    }
+                } else {
+                    // Return null for spectra without precursors
                     ptr::null_mut()
                 }
             }
-        },
-        Err(e) => {
-            log_error(&format!("ERROR: Failed to serialize JSON: {:?}", e));
-            ptr::null_mut()
+            Err(e) => {
+                log_error(&format!("ERROR: Failed to read spectrum {}: {:?}", index, e));
+                ptr::null_mut()
+            }
         }
+    });
+
+    result.unwrap_or(ptr::null_mut())
+}
+
+// Close a reader and free resources
+#[no_mangle]
+pub extern "C" fn close_reader(handle: usize) {
+    let mut readers = READERS.lock().unwrap();
+    if readers.remove(&handle).is_some() {
+        log_error(&format!("Closed reader handle: {}", handle));
+    } else {
+        log_error(&format!("ERROR: Tried to close invalid handle: {}", handle));
     }
 }
 
@@ -247,24 +208,56 @@ pub extern "C" fn is_dia(path: *const c_char) -> bool {
             Err(_) => return false,
         };
 
-        // Try to build a reader and check for DIA
+        log_error(&format!("Checking if DIA: {}", path_str));
+
+        match readers::QuadrupoleSettingsReader::new(path_str) {
+            Ok(quad_reader) => {
+                let has_settings = quad_reader.len() > 0;
+                log_error(&format!("QuadrupoleSettingsReader found {} settings", quad_reader.len()));
+                if has_settings {
+                    log_error("Has quadrupole settings - likely DIA");
+                    return true;
+                }
+            },
+            Err(e) => {
+                log_error(&format!("No QuadrupoleSettingsReader (expected for DDA): {:?}", e));
+            }
+        }
+        
         match readers::SpectrumReader::build()
             .with_path(path_str)
             .finalize()
         {
             Ok(reader) => {
-                // Check a few spectra for DIA characteristics
-                let limit = reader.len().min(10);
+                log_error(&format!("Built reader with {} spectra", reader.len()));
+                let mut rt_to_count: std::collections::HashMap<i64, usize> = std::collections::HashMap::new();
+                let limit = reader.len().min(100);
+                
                 for index in 0..limit {
                     if let Ok(s) = reader.get(index) {
-                        if s.isolation_width > 0.0 {
-                            return true;
+                        if let Some(precursor) = &s.precursor {
+                            let rt_key = (precursor.rt * 100.0) as i64;
+                            *rt_to_count.entry(rt_key).or_insert(0) += 1;
                         }
                     }
                 }
+                
+                log_error(&format!("Found {} unique RT bins", rt_to_count.len()));
+                
+                for (rt, count) in rt_to_count.iter() {
+                    if *count > 3 {
+                        log_error(&format!("Found {} spectra at RT {} - likely DIA", count, *rt as f64 / 100.0));
+                        return true;
+                    }
+                }
+                
+                log_error("No DIA pattern found - likely DDA");
                 false
             },
-            Err(_) => false,
+            Err(e) => {
+                log_error(&format!("Error building reader for heuristic: {:?}", e));
+                false
+            }
         }
     });
 
@@ -282,48 +275,17 @@ pub extern "C" fn tr_free_cstring(s: *mut c_char) {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::ffi::CString;
+// Keep old functions for backwards compatibility but mark as deprecated
+#[no_mangle]
+#[deprecated]
+pub extern "C" fn read_msn_spectra(path: *const c_char) -> *mut c_char {
+    log_error("WARNING: read_msn_spectra is deprecated, use open_reader/get_spectrum/close_reader instead");
+    ptr::null_mut()
+}
 
-    #[test]
-    fn test_is_dia() {
-        // Replace with an actual path to a .d folder on your machine
-        let path = CString::new(r"K:\R00012_GlyCounter\Talus_NB_KELLY\240202_NB_KELLY_cyto_01.d\240202_NB_KELLY_cyto_01_S3-C1_1_9470.d").unwrap();
-        let result = is_dia(path.as_ptr());
-        println!("is_dia result: {}", result);
-    }
-
-    #[test]
-    fn test_read_msn_spectra() {
-        let path = CString::new(r"K:\R00012_GlyCounter\Talus_NB_KELLY\240202_NB_KELLY_cyto_01.d\240202_NB_KELLY_cyto_01_S3-C1_1_9470.d").unwrap();
-        let result_ptr = read_msn_spectra(path.as_ptr());
-        
-        if result_ptr.is_null() {
-            println!("read_msn_spectra returned null");
-        } else {
-            let result = unsafe { CStr::from_ptr(result_ptr) };
-            println!("Result length: {}", result.to_bytes().len());
-            println!("First 100 chars: {:?}", &result.to_str().unwrap()[..100.min(result.to_bytes().len())]);
-            tr_free_cstring(result_ptr);
-        }
-    }
-
-    #[test]
-    fn test_read_msn_spectra_with_config() {
-        let path = CString::new(r"K:\R00012_GlyCounter\Talus_NB_KELLY\240202_NB_KELLY_cyto_01.d\240202_NB_KELLY_cyto_01_S3-C1_1_9470.d").unwrap();
-        let config = CString::new(r#"{"frame_splitting_params":{"Quadrupole":{"UniformMobility":[[0.1,0.05],null]}}}"#).unwrap();
-        
-        let result_ptr = read_msn_spectra_with_config(path.as_ptr(), config.as_ptr());
-        
-        if result_ptr.is_null() {
-            println!("read_msn_spectra_with_config returned null");
-        } else {
-            let result = unsafe { CStr::from_ptr(result_ptr) };
-            println!("Result length: {}", result.to_bytes().len());
-            println!("First 100 chars: {:?}", &result.to_str().unwrap()[..100.min(result.to_bytes().len())]);
-            tr_free_cstring(result_ptr);
-        }
-    }
+#[no_mangle]
+#[deprecated]
+pub extern "C" fn read_msn_spectra_with_config(path: *const c_char, _config_json: *const c_char) -> *mut c_char {
+    log_error("WARNING: read_msn_spectra_with_config is deprecated, use open_reader/get_spectrum/close_reader instead");
+    ptr::null_mut()
 }
