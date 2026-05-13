@@ -48,6 +48,15 @@ Two file formats are supported:
 
 The [timsrust_pyo3](https://github.com/jspaezp/timsrust_pyo3) package is an example of how the performance of TimsRust can be utilized in Python
 
+## FFI smoke test
+
+To exercise the FFI locally without baking any file path into the compiled dll, run the ignored integration test against a raw file or folder on your machine:
+
+```powershell
+$env:TIMSRUST_FFI_RAW_FILE = "C:\path\to\your\raw_data.d"
+cargo test --test ffi_smoke -- --ignored --nocapture
+```
+
 ## Planned changes for future versions
 TODO
 * Improve docs

@@ -3,21 +3,25 @@ use std::os::raw::{c_char};
 use std::{ptr};
 use std::fs::OpenOptions;
 use std::io::Write;
+use std::path::PathBuf;
 use std::sync::Mutex;
 use std::collections::HashMap;
 
 use serde::Serialize;
 
 use crate::ms_data;
-use crate::io::readers::{self, FrameWindowSplittingStrategy, SpectrumReaderConfig};
-use crate::ms_data::AcquisitionType;
+use crate::io::readers::{self};
 
 // Helper to log errors to a file
 fn log_error(msg: &str) {
+    let log_path = std::env::var_os("TIMSRUST_DEBUG_LOG")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| std::env::temp_dir().join("timsrust_debug.log"));
+
     if let Ok(mut file) = OpenOptions::new()
         .create(true)
         .append(true)
-        .open("C:\\temp\\timsrust_debug.log")
+        .open(log_path)
     {
         let _ = writeln!(file, "[{}] {}", chrono::Local::now().format("%Y-%m-%d %H:%M:%S"), msg);
     }
@@ -35,7 +39,7 @@ struct PrecursorOut {
     charge: Option<u8>,
     intensity: Option<f32>,
     spectrum_ref: Option<String>,
-    inverse_ion_mobility: Option<f32>,
+    ion_mobility: Option<f32>,
     isolation_window: Option<[f32; 2]>,
 }
 
@@ -43,12 +47,11 @@ struct PrecursorOut {
 struct RawSpectrumOut {
     precursors: Vec<PrecursorOut>,
     scan_start_time: Option<f32>,
-    ion_injection_time: Option<f32>,
-    total_ion_current: f32,
     mz: Vec<f32>,
     ms_level: u8,
     id: String,
     intensity: Vec<f32>,
+    collision_energy: Option<f32>,
 }
 
 fn parse_precursor(dda_precursor: ms_data::Precursor, isolation_width: Option<f32>) -> PrecursorOut {
@@ -57,7 +60,7 @@ fn parse_precursor(dda_precursor: ms_data::Precursor, isolation_width: Option<f3
         charge: dda_precursor.charge.map(|x| x as u8),
         intensity: dda_precursor.intensity.map(|x| x as f32),
         spectrum_ref: Some(dda_precursor.frame_index.to_string()),
-        inverse_ion_mobility: Some(dda_precursor.im as f32),
+        ion_mobility: Some(dda_precursor.im as f32),
         isolation_window: isolation_width.map(|w| [-w / 2.0, w / 2.0]),
     }
 }
@@ -149,12 +152,11 @@ pub extern "C" fn get_spectrum(handle: usize, index: usize) -> *mut c_char {
                     let raw_spectrum = RawSpectrumOut {
                         precursors: vec![precursor],
                         scan_start_time,
-                        ion_injection_time: None,
-                        total_ion_current: 0.0,
                         mz: spectrum.mz_values.iter().map(|&x| x as f32).collect(),
                         ms_level: 2,
                         id: spectrum.index.to_string(),
                         intensity: spectrum.intensities.iter().map(|&x| x as f32).collect(),
+                        collision_energy: Some(spectrum.collision_energy as f32),
                     };
 
                     match serde_json::to_string(&raw_spectrum) {
@@ -278,14 +280,14 @@ pub extern "C" fn tr_free_cstring(s: *mut c_char) {
 // Keep old functions for backwards compatibility but mark as deprecated
 #[no_mangle]
 #[deprecated]
-pub extern "C" fn read_msn_spectra(path: *const c_char) -> *mut c_char {
+pub extern "C" fn read_msn_spectra(_path: *const c_char) -> *mut c_char {
     log_error("WARNING: read_msn_spectra is deprecated, use open_reader/get_spectrum/close_reader instead");
     ptr::null_mut()
 }
 
 #[no_mangle]
 #[deprecated]
-pub extern "C" fn read_msn_spectra_with_config(path: *const c_char, _config_json: *const c_char) -> *mut c_char {
+pub extern "C" fn read_msn_spectra_with_config(_path: *const c_char, _config_json: *const c_char) -> *mut c_char {
     log_error("WARNING: read_msn_spectra_with_config is deprecated, use open_reader/get_spectrum/close_reader instead");
     ptr::null_mut()
 }

@@ -12,14 +12,14 @@ categories = ["accessibility", "data-structures", "parsing", "science"]
 keywords = ["MS", "LC-TIMS-TOF", "PASEF"]
 
 [lib]
-crate-type = ["cdylib"]
+crate-type = ["cdylib", "rlib"]
 name = "timsrust"
 
 [profile.dev]
 debug = true
    
 [profile.release]
-debug = true 
+debug = false
 
 [dependencies]
 zstd = "0.13.2"
